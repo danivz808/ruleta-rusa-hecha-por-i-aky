@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Ruleta Rusa – Final Tournament</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body{ margin:0; background:#1a1a1a; overflow:hidden; font-family: 'Courier New', Courier, monospace; }
+canvas{ display:block; margin:auto; }
+#menu{
+    position:absolute; inset:0; background:rgba(0,0,0,0.95);
+    color:white; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; z-index:10;
+}
+input, textarea, button { margin: 10px; padding: 10px; border-radius: 5px; border: none; }
+textarea { width: 400px; height: 100px; }
+button { background: #8b0000; color: white; cursor: pointer; font-weight: bold; font-size: 1.2rem; }
+#btnReset { display: none; position: absolute; top: 60%; left: 50%; transform: translate(-50%, -50%); z-index: 20; padding: 20px; }
+#tv {
+    position: absolute; right: 20px; top: 20px;
+    width: 250px; background: rgba(0,0,0,0.8);
+    border: 2px solid #5d3a1a; color: #0f0; padding: 15px; font-size: 12px;
+}
+#info-box { color: gold; margin-bottom: 5px; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+    <h1>💀 RULETA RUSA 💀</h1>
+    <div id="info-box">Jugadores listos: 0 | En espera: 0</div>
+    <label>¿Cuántos juegan ahora?</label>
+    <input id="limitInput" type="number" value="2" min="2" style="width: 60px;">
+    <textarea id="playerNames" placeholder="Juan, Pedro, Ana..." oninput="checkQueue()"></textarea>
+    <button onclick="startGame()">INICIAR PARTIDA</button>
+</div>
+
+<button id="btnReset" onclick="location.reload()">NUEVA PARTIDA</button>
+
+<div id="tv"></div>
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const tv = document.getElementById("tv");
+const infoBox = document.getElementById("info-box");
+const btnReset = document.getElementById("btnReset");
+
+let players = [], blood = [], waitingList = JSON.parse(localStorage.getItem("waiting")) || [];
+let gameOver = false, prizePool = 0, isFinalPhase = false;
+let roomWidth, roomHeight, audioCtx;
+
+const FRASES_TIRO = ["¡Comé plomo, basura!", "¡A vos te quería agarrar!", "¡Saluda a San Pedro!", "¡Mirame a los ojos, rancio!", "¡Esto es por lo de antes!", "¡Muere de una vez!"];
+const FRASES_FALLO = ["¡Zafaste por ahora!", "¡El próximo te vuela la nuca!", "¡Maldita arma de mierda!", "¡Qué suerte tenés!", "¡Rezá lo que sepas!", "¡Disfrutá tus segundos!"];
+const FRASES_SUICIDIO = ["¡No aguanto más!", "¡Me voy al infierno!", "¡Chau mundo rancio!", "¡Miren esto, cobardes!"];
+
+function checkQueue() {
+    let names = document.getElementById("playerNames").value.split(",").filter(n => n.trim() !== "");
+    let limit = parseInt(document.getElementById("limitInput").value);
+    let total = names.length + waitingList.length;
+    infoBox.innerHTML = `Jugadores para esta ronda: ${Math.min(total, limit)} | En espera: ${Math.max(0, total - limit)}`;
+}
+
+function playSound(type) {
+    if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    if(type === 'click') {
+        osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    } else {
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.5);
+    }
+}
+
+function createPlayers() {
+    let limit = parseInt(document.getElementById("limitInput").value);
+    let inputNames = document.getElementById("playerNames").value.split(",").map(n => n.trim()).filter(n => n !== "");
+    let all = [...waitingList, ...inputNames];
+    let toPlay = all.slice(0, limit);
+    waitingList = all.slice(limit);
+    localStorage.setItem("waiting", JSON.stringify(waitingList));
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    roomWidth = canvas.width / 2; roomHeight = canvas.height;
+    prizePool = toPlay.length * 5000;
+
+    players = toPlay.map((name, i) => ({
+        name: name, alive: true, money: 1000,
+        room: i < toPlay.length / 2 ? 0 : 1,
+        x: 0, y: 0, color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+        currentAngle: 0, targetAngle: 0,
+        vengeance: null, isShooting: false,
+        msg: "", msgTimer: 0
+    }));
+    distributePlayers();
+}
+
+function distributePlayers() {
+    [0, 1].forEach(r => {
+        let pInRoom = players.filter(p => p.room === r);
+        let centerX = r === 0 ? roomWidth / 2 : roomWidth + (roomWidth / 2);
+        let centerY = roomHeight / 2;
+        pInRoom.forEach((p, i) => {
+            if(p.x === 0 || isFinalPhase) {
+                let a = (Math.PI * 2 / pInRoom.length) * i;
+                p.x = centerX + Math.cos(a) * 180;
+                p.y = centerY + Math.sin(a) * 180;
+            }
+        });
+    });
+}
+
+function draw() {
+    ctx.fillStyle = "#111"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#333"; ctx.fillRect(roomWidth - 5, 0, 10, roomHeight);
+
+    [0, 1].forEach(r => {
+        let centerX = r === 0 ? roomWidth / 2 : roomWidth + (roomWidth / 2);
+        let centerY = roomHeight / 2;
+        ctx.fillStyle = "#5d3a1a"; ctx.beginPath(); ctx.arc(centerX, centerY, 145, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = "#1b5e20"; ctx.beginPath(); ctx.arc(centerX, centerY, 130, 0, Math.PI*2); ctx.fill();
+
+        players.filter(p => p.room === r).forEach(p => {
+            if(!p.alive) { ctx.fillStyle = "rgba(100, 0, 0, 0.6)"; ctx.beginPath(); ctx.arc(p.x, p.y, 28, 0, Math.PI*2); ctx.fill(); }
+            ctx.fillStyle = p.alive ? p.color : "#444"; ctx.beginPath(); ctx.arc(p.x, p.y, 22, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "white"; ctx.font = "bold 12px Arial"; ctx.textAlign = "center";
+            ctx.fillText(`${p.name} ${p.alive ? '($'+p.money+')' : '☠'}`, p.x, p.y - 35);
+
+            if(p.msgTimer > 0) {
+                let txtW = ctx.measureText(p.msg).width + 20;
+                ctx.fillStyle = "white"; ctx.fillRect(p.x - txtW/2, p.y - 75, txtW, 25);
+                ctx.fillStyle = "black"; ctx.fillText(p.msg, p.x, p.y - 58);
+                p.msgTimer--;
+            }
+
+            if (p.isShooting && p.alive) {
+                ctx.save(); ctx.translate(p.x, p.y);
+                p.currentAngle += (p.targetAngle - p.currentAngle) * 0.15;
+                ctx.rotate(p.currentAngle);
+                ctx.fillStyle = "#444"; ctx.fillRect(10, -5, 35, 10);
+                ctx.fillStyle = "#222"; ctx.fillRect(5, -5, 10, 20);
+                ctx.restore();
+            }
+        });
+    });
+
+    drawBlood();
+    if (!gameOver) requestAnimationFrame(draw);
+}
+
+function drawBlood() {
+    blood.forEach(b => {
+        ctx.fillStyle = `rgba(180, 0, 0, ${b.life/60})`; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+        b.x += b.vx; b.y += b.vy; b.life--;
+    });
+    blood = blood.filter(b => b.life > 0);
+}
+
+function processRoom(roomId) {
+    if(gameOver) return;
+    let alive = players.filter(p => p.room === roomId && p.alive);
+    if (alive.length <= 1) { checkBattleStatus(); return; }
+
+    let shooter = alive[Math.floor(Math.random() * alive.length)];
+    let target = (shooter.vengeance && shooter.vengeance.alive) ? shooter.vengeance : alive[Math.floor(Math.random() * alive.length)];
+
+    shooter.isShooting = true;
+    shooter.targetAngle = Math.atan2(target.y - shooter.y, target.x - shooter.x);
+    let type = target === shooter ? 'suicidio' : 'tiro';
+    shooter.msg = (type === 'tiro' ? FRASES_TIRO : (type === 'suicidio' ? FRASES_SUICIDIO : FRASES_FALLO))[Math.floor(Math.random()*4)];
+    shooter.msgTimer = 100;
+
+    setTimeout(() => {
+        if (Math.random() < 0.3) {
+            playSound('bang'); target.alive = false;
+            for(let i=0; i<40; i++) blood.push({x:target.x, y:target.y, vx:(Math.random()-0.5)*12, vy:(Math.random()-0.5)*12, r:Math.random()*5, life:60});
+        } else {
+            playSound('click'); target.vengeance = shooter;
+            shooter.msg = FRASES_FALLO[Math.floor(Math.random()*4)]; shooter.msgTimer = 80;
+        }
+        shooter.isShooting = false; updateTV();
+        if(!gameOver) setTimeout(() => processRoom(roomId), 1500);
+    }, 1200);
+}
+
+function updateTV() {
+    let html = `<b>LISTA NEGRA</b><hr>`;
+    players.forEach(p => html += `<div style="color:${p.alive ? p.color : '#777'}">${p.name}: ${p.alive ? '$'+p.money : '☠'}</div>`);
+    html += `<hr><span style="color:gold">POZO: $${prizePool}</span>`;
+    tv.innerHTML = html;
+}
+
+function checkBattleStatus() {
+    let survivors0 = players.filter(p => p.room === 0 && p.alive);
+    let survivors1 = players.filter(p => p.room === 1 && p.alive);
+
+    if (survivors0.length === 1 && survivors1.length === 1 && !isFinalPhase) {
+        isFinalPhase = true;
+        players.forEach(p => { if(p.alive) p.room = 0; });
+        distributePlayers();
+        setTimeout(() => processRoom(0), 2000);
+    } else if (players.filter(p => p.alive).length <= 1) {
+        gameOver = true;
+        let winner = players.find(p => p.alive);
+        if(winner) winner.money += prizePool;
+        updateTV(); btnReset.style.display = "block";
+    }
+}
+
+function startGame() {
+    if(!audioCtx) playSound('click');
+    document.getElementById("menu").style.display = "none";
+    createPlayers(); updateTV(); draw();
+    processRoom(0); processRoom(1);
+}
+checkQueue();
+</script>
+</body>
+</html>
